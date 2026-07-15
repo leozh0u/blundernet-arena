@@ -1,0 +1,29 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+vendor/
+
+# Env / secrets — never commit these
+.env
+.env.*
+*.tfvars
+!*.example.tfvars
+
+# Terraform state (holds infra details + can hold secrets)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Model artifacts (large; pulled from BlunderNet, not versioned here)
+*.onnx
+*.pt
+*.pth
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
