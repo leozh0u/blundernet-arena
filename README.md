@@ -1,6 +1,6 @@
 # BlunderNet Arena
 
-A scalable, cloud-native platform for playing chess against [BlunderNet](https://github.com/leozh0u) — my self-trained AlphaZero-style engine.
+A scalable, cloud-native platform for playing chess against [BlunderNet](https://github.com/leozh0u/blundernet), my self-trained AlphaZero-style engine.
 
 **Stack (target):** Go · AWS (ECS Fargate, ALB, SQS, ElastiCache, RDS) · Terraform · React
 
@@ -13,4 +13,4 @@ and the whole stack defined in Terraform.
 
 ## Status
 
-🚧 Early scaffolding. Build log and architecture notes to come.
+Early scaffolding. Build log and architecture notes to come.
