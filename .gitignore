@@ -29,3 +29,7 @@ vendor/
 !.vscode/settings.json
 
 # Local AI-assistant notes — never published
+
+# local build outputs
+/api
+/worker

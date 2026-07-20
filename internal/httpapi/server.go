@@ -1,0 +1,309 @@
+// Package httpapi is the HTTP surface of the api service: JSON REST for
+// game actions, a WebSocket for live updates, and the embedded frontend.
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/leozh0u/blundernet-arena/internal/game"
+	"github.com/leozh0u/blundernet-arena/internal/queue"
+	"github.com/leozh0u/blundernet-arena/internal/store"
+)
+
+const Version = "0.1.0"
+
+type Server struct {
+	games   *store.Games
+	archive *store.Archive
+	jobs    *queue.Client
+	rdb     *redis.Client
+	static  fs.FS
+	mux     *http.ServeMux
+}
+
+func New(games *store.Games, archive *store.Archive, jobs *queue.Client, rdb *redis.Client, static fs.FS) *Server {
+	s := &Server{games: games, archive: archive, jobs: jobs, rdb: rdb, static: static}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /version", s.handleVersion)
+	mux.HandleFunc("POST /api/games", s.handleCreate)
+	mux.HandleFunc("GET /api/games/{id}", s.handleGet)
+	mux.HandleFunc("POST /api/games/{id}/moves", s.handleMove)
+	mux.HandleFunc("POST /api/games/{id}/resign", s.handleResign)
+	mux.HandleFunc("GET /api/games/{id}/ws", s.handleWS)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.Handle("GET /", spaHandler(static))
+	s.mux = mux
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+// State is the wire representation of a game, shared by REST responses and
+// WebSocket events so clients render from one shape.
+type State struct {
+	Type        string   `json:"type"`
+	ID          string   `json:"id"`
+	FEN         string   `json:"fen"`
+	Moves       []string `json:"moves"`
+	Turn        string   `json:"turn"`
+	PlayerColor string   `json:"player_color"`
+	Status      string   `json:"status"`
+	Result      string   `json:"result,omitempty"`
+	Termination string   `json:"termination,omitempty"`
+}
+
+func ToState(g *game.Game) State {
+	return State{
+		Type: "state", ID: g.ID, FEN: g.FEN(), Moves: g.Moves, Turn: g.Turn(),
+		PlayerColor: g.PlayerColor, Status: string(g.Status),
+		Result: g.Result, Termination: g.Termination,
+	}
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if err := s.rdb.Ping(ctx).Err(); err != nil {
+		http.Error(w, "redis unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Write([]byte("ok"))
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"version": Version})
+}
+
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Color string `json:"color"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Color == "" {
+		req.Color = "white"
+	}
+	if req.Color != "white" && req.Color != "black" {
+		httpError(w, http.StatusBadRequest, "color must be white or black")
+		return
+	}
+	g := game.New(uuid.NewString(), req.Color)
+	if err := s.games.Create(r.Context(), g); err != nil {
+		internalError(w, err)
+		return
+	}
+	// Player chose black: the engine opens.
+	if req.Color == "black" {
+		if err := s.jobs.Enqueue(r.Context(), queue.Job{GameID: g.ID, Ply: 0}); err != nil {
+			internalError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, ToState(g))
+}
+
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
+	g, err := s.games.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		gameError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ToState(g))
+}
+
+func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UCI string `json:"uci"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UCI == "" {
+		httpError(w, http.StatusBadRequest, "body must be {\"uci\": \"e2e4\"}")
+		return
+	}
+	g, err := s.games.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		gameError(w, err)
+		return
+	}
+	prevPly := g.Ply
+	if err := g.ApplyMove(g.PlayerColor, req.UCI); err != nil {
+		gameError(w, err)
+		return
+	}
+	if err := s.games.Update(r.Context(), g, prevPly); err != nil {
+		gameError(w, err)
+		return
+	}
+	s.afterChange(r.Context(), g)
+	writeJSON(w, http.StatusOK, ToState(g))
+}
+
+func (s *Server) handleResign(w http.ResponseWriter, r *http.Request) {
+	g, err := s.games.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		gameError(w, err)
+		return
+	}
+	prevPly := g.Ply
+	if err := g.Resign(g.PlayerColor); err != nil {
+		gameError(w, err)
+		return
+	}
+	if err := s.games.Update(r.Context(), g, prevPly); err != nil {
+		gameError(w, err)
+		return
+	}
+	s.afterChange(r.Context(), g)
+	writeJSON(w, http.StatusOK, ToState(g))
+}
+
+// afterChange handles everything downstream of a successful state write:
+// fan-out to watchers, engine hand-off, archival. Best-effort by design —
+// the state in Redis is already authoritative.
+func (s *Server) afterChange(ctx context.Context, g *game.Game) {
+	if raw, err := json.Marshal(ToState(g)); err == nil {
+		if err := s.games.Publish(ctx, g.ID, raw); err != nil {
+			log.Printf("publish %s: %v", g.ID, err)
+		}
+	}
+	switch {
+	case g.Status == game.StatusFinished:
+		if err := s.archive.SaveFinished(ctx, g); err != nil {
+			log.Printf("archive %s: %v", g.ID, err)
+		}
+	case g.Turn() == g.EngineColor():
+		if err := s.jobs.Enqueue(ctx, queue.Job{GameID: g.ID, Ply: g.Ply}); err != nil {
+			log.Printf("enqueue %s: %v", g.ID, err)
+		}
+	}
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.archive.Stats(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+var upgrader = websocket.Upgrader{
+	// Same-origin in production (frontend is served by this binary); allow
+	// cross-origin for local vite dev.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	g, err := s.games.Get(r.Context(), id)
+	if err != nil {
+		gameError(w, err)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	events := s.games.Subscribe(ctx, id)
+
+	// Reader exists only to detect the client going away.
+	go func() {
+		defer cancel()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Initial snapshot, then pub/sub events. One writer goroutine total,
+	// as gorilla requires.
+	if raw, err := json.Marshal(ToState(g)); err == nil {
+		if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+			return
+		}
+	}
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ping.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+				return
+			}
+		case raw, ok := <-events:
+			if !ok {
+				return
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// spaHandler serves the embedded frontend, falling back to index.html for
+// client-side routes.
+func spaHandler(static fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(static))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path != "/" {
+			if _, err := fs.Stat(static, path[1:]); err == nil {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		index, err := fs.ReadFile(static, "index.html")
+		if err != nil {
+			http.Error(w, "frontend not built", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(index)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+func httpError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func internalError(w http.ResponseWriter, err error) {
+	log.Printf("internal error: %v", err)
+	httpError(w, http.StatusInternalServerError, "internal error")
+}
+
+func gameError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "game not found")
+	case errors.Is(err, game.ErrIllegalMove):
+		httpError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, game.ErrNotYourTurn), errors.Is(err, game.ErrFinished),
+		errors.Is(err, store.ErrConflict):
+		httpError(w, http.StatusConflict, err.Error())
+	default:
+		internalError(w, err)
+	}
+}

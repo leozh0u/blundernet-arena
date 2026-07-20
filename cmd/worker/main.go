@@ -2,20 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/leozh0u/blundernet-arena/internal/httpapi"
+	"github.com/leozh0u/blundernet-arena/internal/engine"
 	"github.com/leozh0u/blundernet-arena/internal/queue"
 	"github.com/leozh0u/blundernet-arena/internal/store"
-	"github.com/leozh0u/blundernet-arena/web"
+	"github.com/leozh0u/blundernet-arena/internal/worker"
 )
 
 func main() {
@@ -27,7 +24,6 @@ func main() {
 		log.Fatalf("redis url: %v", err)
 	}
 	rdb := redis.NewClient(opts)
-	games := store.NewGames(rdb)
 
 	archive, err := store.NewArchive(ctx, envOr("DATABASE_URL",
 		"postgres://arena:arena@localhost:5432/arena"))
@@ -41,23 +37,14 @@ func main() {
 		log.Fatalf("queue: %v", err)
 	}
 
-	srv := &http.Server{
-		Addr:              ":" + envOr("PORT", "8080"),
-		Handler:           httpapi.New(games, archive, jobs, rdb, web.Dist()),
-		ReadHeaderTimeout: 5 * time.Second,
+	w := &worker.Worker{
+		Games:   store.NewGames(rdb),
+		Archive: archive,
+		Jobs:    jobs,
+		Engine:  engine.NewFromEnv(),
 	}
-	go func() {
-		log.Printf("api listening on %s", srv.Addr)
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve: %v", err)
-		}
-	}()
-
-	<-ctx.Done()
-	log.Print("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	w.Run(ctx)
+	log.Print("worker stopped")
 }
 
 func envOr(key, def string) string {
