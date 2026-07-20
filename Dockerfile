@@ -39,5 +39,9 @@ FROM debian:bookworm-slim AS worker
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=ortlib /ort/lib/libonnxruntime.so* /usr/local/lib/
 ENV ONNXRUNTIME_LIB=/usr/local/lib/libonnxruntime.so
+# Bake the model in for environments without volume mounts (Fargate). If
+# the artifact is absent the worker falls back to the material engine.
+COPY models/ /models/
+ENV MODEL_PATH=/models/blundernet.onnx
 COPY --from=gobuild /out/worker /usr/local/bin/worker
 ENTRYPOINT ["worker"]

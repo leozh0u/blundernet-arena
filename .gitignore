@@ -38,3 +38,5 @@ vendor/
 web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
+!models/.gitkeep
+.terraform.lock.hcl
