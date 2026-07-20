@@ -9,10 +9,12 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Format
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -26,8 +28,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -40,10 +42,25 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: hashicorp/setup-terraform@v3
       - name: Validate
         run: |
           terraform -chdir=deploy/terraform init -backend=false
           terraform -chdir=deploy/terraform fmt -check
           terraform -chdir=deploy/terraform validate
+
+  # Full-stack proof: build the real images, boot the stack, and play a
+  # game against the engine over the public API. The model artifact is
+  # not in the repo, so the worker exercises the fallback engine here.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Boot stack
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Run e2e
+        run: ./scripts/e2e.sh
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs

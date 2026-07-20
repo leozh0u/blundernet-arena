@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 // Job asks a worker to play the engine move in one game. Ply pins the
@@ -102,35 +101,4 @@ func (c *Client) delete(ctx context.Context, handle string) error {
 		ReceiptHandle: &handle,
 	})
 	return err
-}
-
-// EnsureQueue creates the queue if it does not exist (local dev only; in
-// AWS the queue comes from Terraform). Returns the resolved URL.
-func EnsureQueue(ctx context.Context, name string) (string, error) {
-	tmp := os.Getenv("SQS_QUEUE_URL")
-	_ = tmp
-	var opts []func(*config.LoadOptions) error
-	opts = append(opts,
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("local", "local", "")),
-		config.WithRegion("us-east-1"),
-	)
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
-	if err != nil {
-		return "", err
-	}
-	cli := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-		if endpoint := os.Getenv("SQS_ENDPOINT"); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
-		}
-	})
-	out, err := cli.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String(name),
-		Attributes: map[string]string{
-			string(types.QueueAttributeNameVisibilityTimeout): "30",
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-	return aws.ToString(out.QueueUrl), nil
 }

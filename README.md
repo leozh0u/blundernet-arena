@@ -1,5 +1,7 @@
 # BlunderNet Arena
 
+[![ci](https://github.com/leozh0u/blundernet-arena/actions/workflows/ci.yml/badge.svg)](https://github.com/leozh0u/blundernet-arena/actions/workflows/ci.yml)
+
 Play chess against [BlunderNet](https://github.com/leozh0u/blundernet), a neural network I trained from scratch, at a site built to hold up when many people play at once.
 
 The engine repo answers "can I train a model?" This repo answers a different question: can I serve one? The answer here is a Go service fleet behind a load balancer, with game state in Redis, engine inference decoupled onto queue-fed workers, finished games archived in Postgres, and the whole thing defined in Terraform.
@@ -54,6 +56,19 @@ python scripts/export_onnx.py --repo ../blundernet --out models/blundernet.onnx
 ```
 
 The export script checks that ONNX Runtime and PyTorch produce identical outputs before it succeeds. On this laptop a single position evaluates in 0.64 ms on CPU, which is why the workers do not need GPUs.
+
+### Multiple instances
+
+The statelessness claim is testable locally. The `scale` profile starts an nginx load balancer in front of however many api replicas you ask for:
+
+```
+docker compose --profile scale up -d --build --scale api=3
+BASE=http://localhost:8090 ./scripts/e2e.sh   # requests spread across replicas
+docker compose ps -q api | head -1 | xargs docker kill   # kill one mid-game
+BASE=http://localhost:8090 ./scripts/e2e.sh   # still passes
+```
+
+Games survive instance death because no instance owns a game: state lives in Redis, and move events reach every browser through pub/sub regardless of which replica holds its WebSocket.
 
 ## Load test
 

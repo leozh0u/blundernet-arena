@@ -22,16 +22,22 @@ import (
 
 const Version = "0.1.0"
 
+// Enqueuer is the slice of the queue client this server needs; the
+// narrow interface keeps handlers testable without SQS.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, j queue.Job) error
+}
+
 type Server struct {
 	games   *store.Games
 	archive *store.Archive
-	jobs    *queue.Client
+	jobs    Enqueuer
 	rdb     *redis.Client
 	static  fs.FS
 	mux     *http.ServeMux
 }
 
-func New(games *store.Games, archive *store.Archive, jobs *queue.Client, rdb *redis.Client, static fs.FS) *Server {
+func New(games *store.Games, archive *store.Archive, jobs Enqueuer, rdb *redis.Client, static fs.FS) *Server {
 	s := &Server{games: games, archive: archive, jobs: jobs, rdb: rdb, static: static}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -177,6 +183,9 @@ func (s *Server) afterChange(ctx context.Context, g *game.Game) {
 	}
 	switch {
 	case g.Status == game.StatusFinished:
+		if s.archive == nil {
+			return
+		}
 		if err := s.archive.SaveFinished(ctx, g); err != nil {
 			log.Printf("archive %s: %v", g.ID, err)
 		}

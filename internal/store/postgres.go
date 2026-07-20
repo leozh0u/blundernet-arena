@@ -30,11 +30,31 @@ func NewArchive(ctx context.Context, url string) (*Archive, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if err := initSchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return &Archive{pool: pool}, nil
+}
+
+// initSchema serializes DDL across instances with an advisory lock.
+// Several replicas boot against a fresh database at the same time, and
+// concurrent CREATE TABLE IF NOT EXISTS calls can still collide on the
+// catalog; the lock makes first-boot deterministic. Advisory locks are
+// session-scoped, so everything runs on one pooled connection.
+func initSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	const lockKey = 894273041 // arbitrary app-wide constant
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", lockKey); err != nil {
+		return err
+	}
+	defer conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
+	_, err = conn.Exec(ctx, schema)
+	return err
 }
 
 func (a *Archive) Close() { a.pool.Close() }
