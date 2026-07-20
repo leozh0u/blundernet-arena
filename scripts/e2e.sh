@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# End-to-end smoke test against a running stack (compose up first).
+# Proves the full loop: api -> redis -> queue -> worker -> engine -> redis
+# -> archive. Exits non-zero on any failure.
+set -euo pipefail
+
+BASE="${BASE:-http://localhost:8080}"
+
+json() { python3 -c "import sys, json; print(json.load(sys.stdin)$1)"; }
+
+wait_for_ply() {
+  local id=$1 want=$2
+  for _ in $(seq 1 40); do
+    ply=$(curl -sf "$BASE/api/games/$id" | json "['moves'].__len__()")
+    if [ "$ply" -ge "$want" ]; then return 0; fi
+    sleep 0.5
+  done
+  echo "timed out waiting for ply $want on game $id" >&2
+  return 1
+}
+
+echo "1. health check"
+curl -sf "$BASE/healthz" > /dev/null
+
+echo "2. play black: engine must open"
+id=$(curl -sf -X POST "$BASE/api/games" -H 'Content-Type: application/json' \
+  -d '{"color":"black"}' | json "['id']")
+wait_for_ply "$id" 1
+echo "   engine opened in game $id"
+
+echo "3. play white: 1. e4, engine must reply"
+id=$(curl -sf -X POST "$BASE/api/games" -H 'Content-Type: application/json' \
+  -d '{"color":"white"}' | json "['id']")
+curl -sf -X POST "$BASE/api/games/$id/moves" -H 'Content-Type: application/json' \
+  -d '{"uci":"e2e4"}' > /dev/null
+wait_for_ply "$id" 2
+reply=$(curl -sf "$BASE/api/games/$id" | json "['moves'][1]")
+echo "   engine replied $reply"
+
+echo "4. illegal and out-of-turn moves are rejected"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/games/$id/moves" \
+  -H 'Content-Type: application/json' -d '{"uci":"e2e4"}')
+[ "$code" = "400" ] || { echo "   expected 400, got $code" >&2; exit 1; }
+
+echo "5. resignation archives the game"
+curl -sf -X POST "$BASE/api/games/$id/resign" > /dev/null
+sleep 1
+total=$(curl -sf "$BASE/api/stats" | json "['total']")
+[ "$total" -ge 1 ] || { echo "   stats empty after resign" >&2; exit 1; }
+echo "   stats: $(curl -sf "$BASE/api/stats")"
+
+echo "e2e ok"

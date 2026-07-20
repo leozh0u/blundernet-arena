@@ -52,6 +52,7 @@ export default function App() {
   const [state, setState] = useState(null)
   const [stats, setStats] = useState(null)
   const [error, setError] = useState('')
+  const [selected, setSelected] = useState(null)
   const wsRef = useRef(null)
 
   useEffect(() => {
@@ -77,7 +78,7 @@ export default function App() {
     }
   }
 
-  const onDrop = (from, to, piece) => {
+  const tryMove = (from, to) => {
     if (!state || state.status !== 'ongoing' || state.turn !== state.player_color) {
       return false
     }
@@ -92,6 +93,7 @@ export default function App() {
     }
     if (!mv) return false
     const uci = from + to + (mv.promotion ? 'q' : '')
+    setSelected(null)
     setState({ ...state, fen: probe.fen(), turn: opposite(state.turn) })
     api.move(state.id, uci).then(({ ok, body }) => {
       if (!ok) {
@@ -100,6 +102,25 @@ export default function App() {
       }
     })
     return true
+  }
+
+  const onDrop = (from, to) => tryMove(from, to)
+
+  // Click-to-move: tap a piece, then tap its destination. Matters on
+  // touch screens, where drag-and-drop is unreliable.
+  const onSquareClick = (square) => {
+    if (!state || state.status !== 'ongoing' || state.turn !== state.player_color) {
+      return
+    }
+    if (selected === square) {
+      setSelected(null)
+      return
+    }
+    const probe = new Chess(state.fen)
+    const piece = probe.get(square)
+    const mine = piece && piece.color === (state.player_color === 'white' ? 'w' : 'b')
+    if (selected && tryMove(selected, square)) return
+    setSelected(mine ? square : null)
   }
 
   const opposite = (c) => (c === 'white' ? 'black' : 'white')
@@ -128,10 +149,14 @@ export default function App() {
             <Chessboard
               position={state.fen}
               onPieceDrop={onDrop}
+              onSquareClick={onSquareClick}
               boardOrientation={state.player_color}
               arePiecesDraggable={state.status === 'ongoing'}
               customDarkSquareStyle={{ backgroundColor: '#4a5568' }}
               customLightSquareStyle={{ backgroundColor: '#cbd5e0' }}
+              customSquareStyles={
+                selected ? { [selected]: { backgroundColor: 'rgba(66, 153, 225, 0.55)' } } : {}
+              }
             />
           </div>
           <div className="controls">
