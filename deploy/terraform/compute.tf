@@ -94,7 +94,7 @@ resource "aws_ecs_task_definition" "worker" {
     name        = "worker"
     image       = "${aws_ecr_repository.worker.repository_url}:${var.image_tag}"
     essential   = true
-    environment = local.app_env
+    environment = concat(local.app_env, [{ name = "ENGINE_SIMS", value = "300" }])
     logConfiguration = {
       logDriver = "awslogs"
       options = {

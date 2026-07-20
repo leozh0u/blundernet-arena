@@ -71,6 +71,7 @@ services:
     environment:
       <<: *appenv
       MODEL_PATH: /models/blundernet.onnx
+      ENGINE_SIMS: 300
     volumes:
       - ./models:/models:ro
     depends_on:

@@ -23,10 +23,14 @@ func NewFromEnv() Engine {
 		log.Printf("engine: model %s not found, using material fallback", modelPath)
 		return NewMaterial()
 	}
-	eng, err := NewONNX(modelPath)
+	onnx, err := NewONNX(modelPath)
 	if err != nil {
 		log.Printf("engine: onnx unavailable (%v), using material fallback", err)
 		return NewMaterial()
+	}
+	var eng Engine = onnx
+	if sims := SimsFromEnv(); sims > 1 {
+		eng = NewMCTS(onnx, sims)
 	}
 	log.Printf("engine: %s", eng.Name())
 	return eng
