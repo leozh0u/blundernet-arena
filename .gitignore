@@ -33,3 +33,8 @@ vendor/
 # local build outputs
 /api
 /worker
+
+# frontend
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
