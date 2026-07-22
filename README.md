@@ -64,7 +64,7 @@ The export script checks that ONNX Runtime and PyTorch produce identical outputs
 The statelessness claim is testable locally. The `scale` profile starts an nginx load balancer in front of however many api replicas you ask for:
 
 ```
-docker compose --profile scale up -d --build --scale api=3
+docker compose -f compose.yaml -f compose.scale.yaml up -d --build --scale api=3
 BASE=http://localhost:8090 ./scripts/e2e.sh   # requests spread across replicas
 docker compose ps -q api | head -1 | xargs docker kill   # kill one mid-game
 BASE=http://localhost:8090 ./scripts/e2e.sh   # still passes

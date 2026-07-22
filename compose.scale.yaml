@@ -1,0 +1,18 @@
+# Multi-instance overlay: drops the api's fixed host port so replicas do
+# not collide, and puts nginx in front as a local stand-in for the ALB.
+#
+#   docker compose -f compose.yaml -f compose.scale.yaml up -d --scale api=3
+#   BASE=http://localhost:8090 ./scripts/e2e.sh
+services:
+  api:
+    ports: !reset []
+
+  lb:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./deploy/local/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api

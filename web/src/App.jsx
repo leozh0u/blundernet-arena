@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { Chess } from 'chess.js'
 
@@ -9,7 +9,7 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ color }),
     })
-    if (!res.ok) throw new Error('failed to create game')
+    if (!res.ok) throw new Error('could not start a game')
     return res.json()
   },
   async move(id, uci) {
@@ -34,18 +34,37 @@ function wsURL(id) {
   return `${proto}://${window.location.host}/api/games/${id}/ws`
 }
 
-function statusLine(state) {
-  if (!state) return ''
-  if (state.status === 'finished') {
-    const won =
-      (state.result === '1-0' && state.player_color === 'white') ||
-      (state.result === '0-1' && state.player_color === 'black')
-    if (state.result === '1/2-1/2') return `Draw — ${state.termination}`
-    return won
-      ? `You win — ${state.termination}`
-      : `BlunderNet wins — ${state.termination}`
+const other = (c) => (c === 'white' ? 'black' : 'white')
+
+// Group the flat UCI list into numbered pairs for the move panel, and
+// convert to algebraic (Nf3) which is what chess players actually read.
+function movePairs(moves) {
+  const board = new Chess()
+  const san = moves.map((uci) => {
+    const mv = board.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci[4] || undefined,
+    })
+    return mv ? mv.san : uci
+  })
+  const pairs = []
+  for (let i = 0; i < san.length; i += 2) {
+    pairs.push({ n: i / 2 + 1, white: san[i], black: san[i + 1] })
   }
-  return state.turn === state.player_color ? 'Your move' : 'BlunderNet is thinking…'
+  return pairs
+}
+
+function outcome(state) {
+  if (state.status !== 'finished') return null
+  if (state.result === '1/2-1/2') return { kind: 'draw', title: 'Draw' }
+  const playerWon =
+    (state.result === '1-0' && state.player_color === 'white') ||
+    (state.result === '0-1' && state.player_color === 'black')
+  return {
+    kind: playerWon ? 'win' : 'loss',
+    title: playerWon ? 'You win' : 'BlunderNet wins',
+  }
 }
 
 export default function App() {
@@ -59,16 +78,19 @@ export default function App() {
     api.stats().then(setStats).catch(() => {})
   }, [state?.status])
 
+  useEffect(() => () => wsRef.current?.close(), [])
+
   const connect = useCallback((id) => {
     wsRef.current?.close()
     const ws = new WebSocket(wsURL(id))
     ws.onmessage = (ev) => setState(JSON.parse(ev.data))
-    ws.onerror = () => setError('connection lost — refresh to resume')
+    ws.onerror = () => setError('Connection lost. Refresh to resume.')
     wsRef.current = ws
   }, [])
 
   const newGame = async (color) => {
     setError('')
+    setSelected(null)
     try {
       const st = await api.createGame(color)
       setState(st)
@@ -78,12 +100,12 @@ export default function App() {
     }
   }
 
+  const myTurn = state && state.status === 'ongoing' && state.turn === state.player_color
+
   const tryMove = (from, to) => {
-    if (!state || state.status !== 'ongoing' || state.turn !== state.player_color) {
-      return false
-    }
-    // Server validates for real; chess.js just supplies promotion detection
-    // and instant local rejection of obvious illegal drops.
+    if (!myTurn) return false
+    // The server is the authority; chess.js here only detects promotions
+    // and rejects obviously illegal drops without a round trip.
     const probe = new Chess(state.fen)
     let mv
     try {
@@ -92,96 +114,176 @@ export default function App() {
       return false
     }
     if (!mv) return false
-    const uci = from + to + (mv.promotion ? 'q' : '')
     setSelected(null)
-    setState({ ...state, fen: probe.fen(), turn: opposite(state.turn) })
-    api.move(state.id, uci).then(({ ok, body }) => {
+    setState({ ...state, fen: probe.fen(), turn: other(state.turn) })
+    api.move(state.id, from + to + (mv.promotion ? 'q' : '')).then(({ ok, body }) => {
       if (!ok) {
-        setError(body.error || 'move rejected')
+        setError(body.error || 'That move was rejected.')
         setState((s) => ({ ...s }))
       }
     })
     return true
   }
 
-  const onDrop = (from, to) => tryMove(from, to)
-
-  // Click-to-move: tap a piece, then tap its destination. Matters on
-  // touch screens, where drag-and-drop is unreliable.
+  // Click a piece, then click its destination. Drag works too, but taps
+  // are how most people play on a phone.
   const onSquareClick = (square) => {
-    if (!state || state.status !== 'ongoing' || state.turn !== state.player_color) {
-      return
-    }
-    if (selected === square) {
-      setSelected(null)
-      return
-    }
-    const probe = new Chess(state.fen)
-    const piece = probe.get(square)
-    const mine = piece && piece.color === (state.player_color === 'white' ? 'w' : 'b')
+    if (!myTurn) return
+    if (selected === square) return setSelected(null)
     if (selected && tryMove(selected, square)) return
+    const piece = new Chess(state.fen).get(square)
+    const mine = piece && piece.color === (state.player_color === 'white' ? 'w' : 'b')
     setSelected(mine ? square : null)
   }
 
-  const opposite = (c) => (c === 'white' ? 'black' : 'white')
+  const legalTargets = useMemo(() => {
+    if (!selected || !state) return []
+    return new Chess(state.fen)
+      .moves({ square: selected, verbose: true })
+      .map((m) => m.to)
+  }, [selected, state])
+
+  const squareStyles = useMemo(() => {
+    const styles = {}
+    if (selected) {
+      styles[selected] = { background: 'rgba(212, 162, 76, 0.45)' }
+    }
+    for (const sq of legalTargets) {
+      styles[sq] = {
+        background:
+          'radial-gradient(circle, rgba(212,162,76,0.55) 22%, transparent 24%)',
+      }
+    }
+    // Highlight the last move so you can see what the engine just played.
+    const last = state?.moves?.[state.moves.length - 1]
+    if (last) {
+      for (const sq of [last.slice(0, 2), last.slice(2, 4)]) {
+        styles[sq] = { ...styles[sq], boxShadow: 'inset 0 0 0 3px rgba(125,211,252,0.5)' }
+      }
+    }
+    return styles
+  }, [selected, legalTargets, state])
+
+  const result = state ? outcome(state) : null
+  const pairs = state ? movePairs(state.moves) : []
 
   return (
-    <div className="app">
-      <header>
-        <h1>BlunderNet Arena</h1>
-        <p className="tagline">Play against a self-trained neural network</p>
+    <div className="page">
+      <header className="masthead">
+        <div className="brand">
+          <span className="mark">♞</span>
+          <div>
+            <h1>BlunderNet Arena</h1>
+            <p>A neural network trained from scratch. Come beat it.</p>
+          </div>
+        </div>
+        {stats && stats.total > 0 && (
+          <dl className="scoreboard">
+            <div><dt>Games</dt><dd>{stats.total}</dd></div>
+            <div><dt>Engine</dt><dd>{stats.engine_wins}</dd></div>
+            <div><dt>Humans</dt><dd>{stats.player_wins}</dd></div>
+            <div><dt>Draws</dt><dd>{stats.draws}</dd></div>
+          </dl>
+        )}
       </header>
 
-      {!state && (
-        <div className="lobby">
-          <p>Choose your side. BlunderNet answers every move from its own training run.</p>
-          <div className="buttons">
-            <button onClick={() => newGame('white')}>Play White</button>
-            <button onClick={() => newGame('black')}>Play Black</button>
+      {!state ? (
+        <section className="lobby">
+          <h2>Pick a side</h2>
+          <p>
+            Every reply comes from BlunderNet running a tree search over its own
+            policy and value network. It is not a grandmaster. That is the fun.
+          </p>
+          <div className="choices">
+            <button className="choice" onClick={() => newGame('white')}>
+              <span className="pieces">♔</span>
+              <span className="label">Play as White</span>
+              <span className="sub">You move first</span>
+            </button>
+            <button className="choice dark" onClick={() => newGame('black')}>
+              <span className="pieces">♚</span>
+              <span className="label">Play as Black</span>
+              <span className="sub">Engine opens</span>
+            </button>
           </div>
-        </div>
-      )}
+        </section>
+      ) : (
+        <main className="game">
+          <div className="board-wrap">
+            <div className="board">
+              <Chessboard
+                position={state.fen}
+                onPieceDrop={(f, t) => tryMove(f, t)}
+                onSquareClick={onSquareClick}
+                boardOrientation={state.player_color}
+                arePiecesDraggable={state.status === 'ongoing'}
+                customBoardStyle={{ borderRadius: '10px' }}
+                customDarkSquareStyle={{ backgroundColor: '#8a6a48' }}
+                customLightSquareStyle={{ backgroundColor: '#eddab9' }}
+                customSquareStyles={squareStyles}
+              />
+              {result && (
+                <div className={`overlay ${result.kind}`}>
+                  <div className="verdict">
+                    <h2>{result.title}</h2>
+                    <p>by {state.termination}</p>
+                    <div className="again">
+                      <button onClick={() => newGame('white')}>Play White</button>
+                      <button className="ghost" onClick={() => newGame('black')}>
+                        Play Black
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
 
-      {state && (
-        <div className="game">
-          <div className="status">{statusLine(state)}</div>
-          <div className="board">
-            <Chessboard
-              position={state.fen}
-              onPieceDrop={onDrop}
-              onSquareClick={onSquareClick}
-              boardOrientation={state.player_color}
-              arePiecesDraggable={state.status === 'ongoing'}
-              customDarkSquareStyle={{ backgroundColor: '#4a5568' }}
-              customLightSquareStyle={{ backgroundColor: '#cbd5e0' }}
-              customSquareStyles={
-                selected ? { [selected]: { backgroundColor: 'rgba(66, 153, 225, 0.55)' } } : {}
-              }
-            />
-          </div>
-          <div className="controls">
-            {state.status === 'ongoing' ? (
-              <button className="secondary" onClick={() => api.resign(state.id)}>
+          <aside className="panel">
+            <div className={`turn ${myTurn ? 'you' : 'engine'}`}>
+              {state.status === 'finished' ? (
+                <span>Game over</span>
+              ) : myTurn ? (
+                <span>Your move</span>
+              ) : (
+                <span className="thinking">
+                  BlunderNet is thinking<i /><i /><i />
+                </span>
+              )}
+            </div>
+
+            <div className="moves">
+              {pairs.length === 0 ? (
+                <p className="empty">No moves yet.</p>
+              ) : (
+                <ol>
+                  {pairs.map((p) => (
+                    <li key={p.n}>
+                      <span className="num">{p.n}.</span>
+                      <span className="san">{p.white}</span>
+                      <span className="san">{p.black || ''}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+
+            {state.status === 'ongoing' && (
+              <button className="ghost wide" onClick={() => api.resign(state.id)}>
                 Resign
               </button>
-            ) : (
-              <>
-                <button onClick={() => newGame('white')}>Rematch as White</button>
-                <button onClick={() => newGame('black')}>Rematch as Black</button>
-              </>
             )}
-          </div>
-        </div>
+          </aside>
+        </main>
       )}
 
       {error && <div className="error">{error}</div>}
 
-      {stats && stats.total > 0 && (
-        <footer>
-          {stats.total} games played · engine {stats.engine_wins} · humans{' '}
-          {stats.player_wins} · draws {stats.draws}
-        </footer>
-      )}
+      <footer className="foot">
+        <a href="https://github.com/leozh0u/blundernet-arena">Source</a>
+        <span>·</span>
+        <a href="https://github.com/leozh0u/blundernet">The engine</a>
+      </footer>
     </div>
   )
 }
