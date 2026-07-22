@@ -40,3 +40,7 @@ web/dist/*
 !web/dist/.gitkeep
 !models/.gitkeep
 .terraform.lock.hcl
+
+# demo stack terraform state
+deploy/demo/.terraform/
+deploy/demo/.terraform.lock.hcl

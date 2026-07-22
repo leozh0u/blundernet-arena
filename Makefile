@@ -46,3 +46,43 @@ deploy:
 
 destroy:
 	$(TF) destroy -auto-approve
+
+# Always-on demo box ------------------------------------------------------
+# One small ARM instance running the same containers against real SQS,
+# for the public link. Roughly $10/month, versus ~$60 for the fleet above.
+
+TFDEMO = terraform -chdir=deploy/demo
+
+demo-deploy:
+	$(TFDEMO) init -input=false
+	$(TFDEMO) apply -auto-approve -input=false \
+		-target=aws_ecr_repository.api -target=aws_ecr_repository.worker -target=aws_sqs_queue.moves
+	$(eval ECR_API := $(shell $(TFDEMO) output -raw ecr_api))
+	$(eval ECR_WORKER := $(shell $(TFDEMO) output -raw ecr_worker))
+	aws ecr get-login-password --region $(AWS_REGION) | \
+		docker login --username AWS --password-stdin $(shell echo $(ECR_API) | cut -d/ -f1)
+	docker build --platform linux/arm64 --provenance=false --target api -t $(ECR_API):latest .
+	docker build --platform linux/arm64 --provenance=false --target worker -t $(ECR_WORKER):latest .
+	docker push $(ECR_API):latest
+	docker push $(ECR_WORKER):latest
+	$(TFDEMO) apply -auto-approve -input=false
+	@echo "demo live at: $$($(TFDEMO) output -raw url)"
+
+# Ship new code to the running demo box without recreating it.
+demo-update:
+	$(eval ECR_API := $(shell $(TFDEMO) output -raw ecr_api))
+	$(eval ECR_WORKER := $(shell $(TFDEMO) output -raw ecr_worker))
+	aws ecr get-login-password --region $(AWS_REGION) | \
+		docker login --username AWS --password-stdin $(shell echo $(ECR_API) | cut -d/ -f1)
+	docker build --platform linux/arm64 --provenance=false --target api -t $(ECR_API):latest .
+	docker build --platform linux/arm64 --provenance=false --target worker -t $(ECR_WORKER):latest .
+	docker push $(ECR_API):latest
+	docker push $(ECR_WORKER):latest
+	aws ssm send-command --region $(AWS_REGION) \
+		--instance-ids $$($(TFDEMO) output -raw instance_id) \
+		--document-name AWS-RunShellScript \
+		--parameters 'commands=["cd /opt/arena && aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(shell echo $(ECR_API) | cut -d/ -f1) && docker compose pull && docker compose up -d"]' \
+		--output text --query 'Command.CommandId'
+
+demo-destroy:
+	$(TFDEMO) destroy -auto-approve

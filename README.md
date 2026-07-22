@@ -85,7 +85,23 @@ games completed  237, one worker process
 
 The engine reply number is bounded by the test's own 300 ms polling interval; the inference itself is under a millisecond. The same script points at the ALB with `-e BASE=http://<alb-dns>`.
 
-## Deploying
+## Two deployments, on purpose
+
+The repo ships two stacks, because the architecture worth designing and the architecture worth paying for every month are not the same thing.
+
+`deploy/terraform` is the reference design: an autoscaling api fleet behind an ALB, workers scaled on queue depth, ElastiCache, RDS. It is what the system should look like under load, it has been deployed and exercised end to end, and it costs roughly $60 a month to leave running. So it goes up on demand and comes down after.
+
+`deploy/demo` is what actually stays online: one t4g.micro running the same two container images against a real SQS queue, with Postgres and Redis alongside and Caddy in front, for about $10 a month. Same code, same queue semantics, a tenth of the bill. Traffic to a demo link does not need six tasks and a load balancer, and pretending otherwise would be an expensive way to make a point.
+
+```
+make demo-deploy    # build arm64 images, push, stand up the box
+make demo-update    # ship new code to the running box
+make demo-destroy   # take it down
+```
+
+Point a domain's A record at the instance IP and set `domain` in `deploy/demo`, and Caddy issues a certificate automatically on the next apply.
+
+## Deploying the full stack
 
 ```
 cd deploy/terraform
